@@ -28,80 +28,115 @@ struct thread {
 static void *thread_start(struct thread *threads, int n);
 static void thread_join(void *handle, int n);
 
-static emscripten_semaphore_t g_worker_semaphore;
-static bool g_worker_semaphore_initialized = false;
-static void *g_worker_handle = NULL;
-static int g_worker_count = 0;
+struct wasm_worker_context {
+  struct thread *thread;
+  emscripten_semaphore_t *semaphore;
+};
 
-static inline void thread_function(int slot_ptr) {
-  struct thread *job = (struct thread *)(uintptr_t)slot_ptr;
-  if (!job) {
-    return;
-  }
+struct wasm_thread_group {
+  emscripten_wasm_worker_t *workers;
+  struct wasm_worker_context *contexts;
+  emscripten_semaphore_t semaphore;
+};
 
-  emscripten_semaphore_release(&g_worker_semaphore, 1);
-  job->func(job->ud);
-  emscripten_semaphore_waitinf_acquire(&g_worker_semaphore, 1);
+static inline void
+thread_function(int arg) {
+  struct wasm_worker_context *ctx = (struct wasm_worker_context *)(intptr_t)arg;
+  emscripten_semaphore_release(ctx->semaphore, 1);
+  ctx->thread->func(ctx->thread->ud);
+  emscripten_semaphore_waitinf_acquire(ctx->semaphore, 1);
 }
 
-static inline void *thread_start(struct thread *threads, int n) {
-  if (!threads || (n <= 0)) {
+static void
+wasm_thread_group_destroy(struct wasm_thread_group *group,
+                                      int worker_count) {
+  if (!group) {
+    return;
+  }
+  if (group->workers) {
+    for (int i = 0; i < worker_count; ++i) {
+      if (group->workers[i] > 0) {
+        emscripten_terminate_wasm_worker(group->workers[i]);
+      }
+    }
+    free(group->workers);
+  }
+  if (group->contexts) {
+    free(group->contexts);
+  }
+  free(group);
+}
+
+static inline void *
+thread_start(struct thread *threads, int n) {
+  struct wasm_thread_group *group =
+      (struct wasm_thread_group *)malloc(sizeof(*group));
+  if (!group) {
+    return NULL;
+  }
+  group->workers = NULL;
+  group->contexts = NULL;
+
+  emscripten_semaphore_init(&group->semaphore, 0);
+
+  group->workers =
+      (emscripten_wasm_worker_t *)malloc(n * sizeof(emscripten_wasm_worker_t));
+  group->contexts = (struct wasm_worker_context *)malloc(
+      n * sizeof(struct wasm_worker_context));
+  if (!group->workers || !group->contexts) {
+    wasm_thread_group_destroy(group, 0);
     return NULL;
   }
 
-  if (!g_worker_semaphore_initialized) {
-    emscripten_semaphore_init(&g_worker_semaphore, 0);
-    g_worker_semaphore_initialized = true;
-  }
-
-  struct thread *jobs =
-      (struct thread *)malloc((size_t)n * sizeof(struct thread));
-  if (!jobs) {
-    return NULL;
-  }
-
-  for (int i = 0; i < n; i++) {
-    jobs[i] = threads[i];
+  for (int i = 0; i < n; ++i) {
+    group->contexts[i].thread = &threads[i];
+    group->contexts[i].semaphore = &group->semaphore;
     emscripten_wasm_worker_t worker =
         emscripten_malloc_wasm_worker(WASM_STACK_SIZE);
     if (worker <= 0) {
-      emscripten_terminate_all_wasm_workers();
-      free(jobs);
+      wasm_thread_group_destroy(group, i);
       return NULL;
     }
+    group->workers[i] = worker;
     emscripten_wasm_worker_post_function_vi(worker, thread_function,
-                                            (int)(uintptr_t)&jobs[i]);
+                                            (int)(intptr_t)&group->contexts[i]);
   }
 
-  return (void *)jobs;
+  return group;
 }
 
-static inline void thread_join(void *handle, int n) {
-  (void)n;
-
-  if (!handle) {
-    emscripten_terminate_all_wasm_workers();
+static inline void
+thread_join(void *handle, int n) {
+  struct wasm_thread_group *group = (struct wasm_thread_group *)handle;
+  if (!group) {
     return;
   }
 
-  if (g_worker_semaphore_initialized) {
-    while (emscripten_atomic_load_u32((const void *)&g_worker_semaphore) != 0) {
-      emscripten_sleep(1);
-    }
+  while (emscripten_atomic_load_u32((const void *)&group->semaphore) != 0) {
+    emscripten_sleep(1);
   }
 
-  emscripten_terminate_all_wasm_workers();
-  free(handle);
+  wasm_thread_group_destroy(group, n);
+  fprintf(stdout, "Thread group destroyed.\n");
 }
 
-static void run_in_worker(void *arg) {
+static void
+run_in_worker(void *arg) {
   (void)arg;
   emscripten_outf("Worker started.\n");
-  for (;;) {
-    emscripten_outf("Worker is working...\n");
+  int i;
+  for (i = 0;; i++) {
+    double now = emscripten_performance_now();
+    emscripten_outf("Worker is working... iteration %d at time %.2f ms\n", i,
+                    now);
     uint64_t ns = 5 * 1000000000ULL;
     emscripten_wasm_worker_sleep(ns);
+    if (i >= 5) {
+      break;
+    }
   }
+  emscripten_outf("Worker finished.\n");
+  sapp_quit();
 }
 
 struct app_context {
@@ -110,54 +145,8 @@ struct app_context {
 
 static struct app_context *CTX = NULL;
 
-static int start_app(lua_State *L) {
-  lua_getfield(L, LUA_REGISTRYINDEX, "MAINCHUNK");
-  if (lua_islightuserdata(L, 1)) {
-    fprintf(stderr, "Error during Lua initialization: %s\n",
-            (const char *)lua_touserdata(L, 1));
-    return 1;
-  }
-  lua_getfield(L, -1, "start");
-  if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
-    const char *err = lua_tostring(L, -1);
-    fprintf(stderr, "Error during Lua start: %s\n", err);
-    return 1;
-  }
-  lua_pop(L, 1);
-  return 0;
-}
-
-static void app_init() {
-  lua_State *L = CTX->L;
-  if (!L) {
-    fprintf(stderr, "Lua state is NULL, quitting application.\n");
-    sapp_quit();
-  }
-  if (start_app(L) != 0) {
-    sapp_quit();
-  }
-}
-
-static int pwait(lua_State *L) {
-  lua_getfield(L, LUA_REGISTRYINDEX, "MAINCHUNK");
-  lua_getfield(L, -1, "wait");
-  if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
-    return lua_error(L);
-  }
-  return 0;
-}
-
-static void app_cleanup(void) {
-  lua_State *L = CTX->L;
-  if (L) {
-    lua_pushcfunction(L, pwait);
-    lua_call(L, 0, 0);
-    lua_close(L);
-    CTX->L = NULL;
-  }
-}
-
-static int lthread_start(lua_State *L) {
+static int
+lthread_start(lua_State *L) {
   int n = (int)luaL_checkinteger(L, 1);
   if (n <= 0) {
     luaL_error(L, "Invalid number of threads");
@@ -177,7 +166,6 @@ static int lthread_start(lua_State *L) {
   }
 
   void *handle = thread_start(threads, n);
-  free(threads);
 
   if (!handle) {
     luaL_error(L, "Failed to start threads");
@@ -188,54 +176,76 @@ static int lthread_start(lua_State *L) {
   return 1;
 }
 
-static int lthread_join(lua_State *L) {
+static int
+lthread_join(lua_State *L) {
   void *handle = lua_touserdata(L, 1);
-  if (!handle) {
-    luaL_error(L, "Invalid thread handle");
-    return 0;
+  int n = (int)luaL_checkinteger(L, 2);
+  if (handle) {
+    thread_join(handle, n);
   }
-  thread_join(handle, 0);
   return 0;
 }
 
-LUAMOD_API int luaopen_emtest(lua_State *L) {
-  luaL_Reg l[] = {
-      {"start", lthread_start},
-      {"join", lthread_join},
-      {NULL, NULL},
-  };
-  luaL_newlib(L, l);
-  return 1;
+static int
+start_app(lua_State *L) {
+  lua_pushcfunction(L, lthread_start);
+  lua_pushinteger(L, 2);
+
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+    const char *err = lua_tostring(L, -1);
+    fprintf(stderr, "Error during Lua start: %s\n", err);
+    lua_pop(L, 1);
+    return 1;
+  }
+
+  lua_setfield(L, LUA_REGISTRYINDEX, "thread_handle");
+
+  return 0;
 }
 
-void openlibs(lua_State *L) {
-  luaL_openlibs(L);
-
-  luaL_requiref (L, "emtest", luaopen_emtest, 0);
+static void
+app_init() {
+  lua_State *L = CTX->L;
+  if (!L) {
+    fprintf(stderr, "Lua state is NULL, quitting application.\n");
+    sapp_quit();
+  }
+  if (start_app(L) != 0) {
+    sapp_quit();
+  }
 }
 
-static int msghandler(lua_State *L) {
+static void
+app_cleanup(void) {
+  lua_State *L = CTX->L;
+  if (L) {
+    lua_pushcfunction(L, lthread_join);
+    lua_getfield(L, LUA_REGISTRYINDEX, "thread_handle");
+    lua_pushinteger(L, 2);
+    lua_pcall(L, 2, 0, 0);
+    lua_close(L);
+    CTX->L = NULL;
+  }
+}
+
+void
+openlibs(lua_State *L) { luaL_openlibs(L); }
+
+static int
+msghandler(lua_State *L) {
   const char *msg = lua_tostring(L, 1);
   luaL_traceback(L, L, msg, 1);
   return 1;
 }
 
-static const char *code =
-    "local f = assert(loadfile('/data/main.lua')); return f()";
-
-static int pmain(lua_State *L) {
+static int
+pmain(lua_State *L) {
   openlibs(L);
-
-  if (luaL_loadstring(L, code) != LUA_OK) {
-    return lua_error(L);
-  }
-
-  lua_call(L, 0, 1);
-  lua_setfield(L, LUA_REGISTRYINDEX, "MAINCHUNK");
   return 0;
 }
 
-sapp_desc sokol_main(int argc, char *argv[]) {
+sapp_desc
+sokol_main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
 
