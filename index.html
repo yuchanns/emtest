@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Emscripten Test</title>
+  <style>
+    body { margin: 0; background: #000; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" oncontextmenu="event.preventDefault()"></canvas>
+
+  <script>
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    preRun: [function () {
+    }],
+    onRuntimeInitialized: function () {
+      console.log('Runtime ready');
+    },
+    onExit: function (status) {
+      console.log('Program exited with status', status);
+    },
+    onAbort: function (what) {
+      console.error('Program aborted:', what);
+    },
+    print: console.log,
+    printErr: console.error
+  };
+  </script>
+  <script src="./emtest.js"></script>
+</body>
+</html>

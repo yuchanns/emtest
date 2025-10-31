@@ -1,0 +1,6 @@
+CompileFlags:
+  Add:
+    - -D__EMSCRIPTEN__
+    - -I../emsdk/upstream/emscripten/cache/ports/emdawnwebgpu/emdawnwebgpu_pkg/webgpu/include
+    - -I../emsdk/upstream/emscripten/cache/sysroot/include
+    - -I../emsdk/upstream/emscripten/system/include
