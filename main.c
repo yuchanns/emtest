@@ -134,7 +134,6 @@ static void app_init() {
     sapp_quit();
   }
   if (start_app(L) != 0) {
-    lua_close(L);
     sapp_quit();
   }
 }
@@ -212,17 +211,7 @@ LUAMOD_API int luaopen_emtest(lua_State *L) {
 void openlibs(lua_State *L) {
   luaL_openlibs(L);
 
-  static const luaL_Reg modules[] = {
-      {"emtest", luaopen_emtest},
-  };
-
-  const luaL_Reg *lib;
-  luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);
-  for (lib = modules; lib->func; lib++) {
-    lua_pushcfunction(L, lib->func);
-    lua_setfield(L, -2, lib->name);
-  }
-  lua_pop(L, 1);
+  luaL_requiref (L, "emtest", luaopen_emtest, 0);
 }
 
 static int msghandler(lua_State *L) {
