@@ -15,6 +15,25 @@
   var Module = {
     canvas: document.getElementById('canvas'),
     preRun: [function () {
+      Module.FS_createPath('/', 'data', true, true);
+      const script = `
+local emtest = require("emtest")
+
+local M = {}
+
+local handle
+
+function M.start()
+  handle = emtest.start(10)
+end
+
+function M.wait()
+  emtest.join(handle)
+end
+
+return M
+      `;
+      Module.FS_createDataFile('/data', 'main.lua', script, true, true);
     }],
     onRuntimeInitialized: function () {
       console.log('Runtime ready');
