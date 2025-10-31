@@ -96,9 +96,9 @@ static inline void thread_join(void *handle, int n) {
 
 static void run_in_worker(void *arg) {
   (void)arg;
-  fprintf(stdout, "Worker is starting a task...\n");
+  emscripten_outf("Worker started.\n");
   for (;;) {
-    fprintf(stdout, "Worker is working...\n");
+    emscripten_outf("Worker is working...\n");
     uint64_t ns = 5 * 1000000000ULL;
     emscripten_wasm_worker_sleep(ns);
   }
