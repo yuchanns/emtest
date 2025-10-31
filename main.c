@@ -42,9 +42,8 @@ struct wasm_thread_group {
 static inline void
 thread_function(int arg) {
   struct wasm_worker_context *ctx = (struct wasm_worker_context *)(intptr_t)arg;
-  emscripten_semaphore_release(ctx->semaphore, 1);
   ctx->thread->func(ctx->thread->ud);
-  emscripten_semaphore_waitinf_acquire(ctx->semaphore, 1);
+  emscripten_semaphore_release(ctx->semaphore, 1);
 }
 
 static void
@@ -112,9 +111,7 @@ thread_join(void *handle, int n) {
     return;
   }
 
-  while (emscripten_atomic_load_u32((const void *)&group->semaphore) != 0) {
-    emscripten_sleep(1);
-  }
+  while (emscripten_semaphore_try_acquire(&group->semaphore, n) == -1);
 
   wasm_thread_group_destroy(group, n);
   fprintf(stdout, "Thread group destroyed.\n");
@@ -123,11 +120,12 @@ thread_join(void *handle, int n) {
 static void
 run_in_worker(void *arg) {
   (void)arg;
-  emscripten_outf("Worker started.\n");
+  int id = emscripten_wasm_worker_self_id();
+  emscripten_outf("Worker %d started.\n", id);
   int i;
   for (i = 0;; i++) {
     double now = emscripten_performance_now();
-    emscripten_outf("Worker is working... iteration %d at time %.2f ms\n", i,
+    emscripten_outf("Worker %d iteration %d at time %f ms.\n", id, i,
                     now);
     uint64_t ns = 5 * 1000000000ULL;
     emscripten_wasm_worker_sleep(ns);
@@ -135,7 +133,7 @@ run_in_worker(void *arg) {
       break;
     }
   }
-  emscripten_outf("Worker finished.\n");
+  emscripten_outf("Worker %d exiting.\n", id);
   sapp_quit();
 }
 
@@ -189,7 +187,7 @@ lthread_join(lua_State *L) {
 static int
 start_app(lua_State *L) {
   lua_pushcfunction(L, lthread_start);
-  lua_pushinteger(L, 2);
+  lua_pushinteger(L, emscripten_navigator_hardware_concurrency());
 
   if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
     const char *err = lua_tostring(L, -1);
